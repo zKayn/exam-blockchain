@@ -137,6 +137,11 @@ app.use('/api/blockchain-analytics',
   require('./routes/blockchain-analytics')
 );
 
+// Debug route (chỉ cho development)
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/debug-blockchain', require('./routes/debug-blockchain'));
+}
+
 // ==================== MAINTENANCE ROUTES ====================
 // Manual maintenance endpoints (admin only)
 app.post('/api/maintenance/auto-submit', 
