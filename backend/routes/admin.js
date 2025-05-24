@@ -1,10 +1,16 @@
-// routes/admin.js
 const router = require('express').Router();
 const authMiddleware = require('../middleware/auth');
 const Exam = require('../models/Exam');
 const User = require('../models/User');
 const Submission = require('../models/Submission');
-const { getSubmissionFromBlockchain, verifyBlockchain } = require('../utils/blockchain-simulator');
+const { 
+  getSubmissionFromBlockchain, 
+  verifyBlockchain, 
+  compareSubmissionWithBlockchain,
+  getBlockchainStats,
+  getSubmissionsByStudent,
+  getSubmissionsByExam
+} = require('../utils/blockchain-simulator');
 
 // Dashboard thống kê
 router.get('/dashboard', async (req, res) => {
@@ -483,4 +489,247 @@ router.get('/blockchain/verify', async (req, res) => {
   }
 });
 
+// Dashboard thống kê với blockchain
+router.get('/dashboard', async (req, res) => {
+  try {
+    const totalExams = await Exam.countDocuments();
+    const totalStudents = await User.countDocuments({ role: 'student' });
+    const activeExams = await Exam.countDocuments({ 
+      isActive: true,
+      endTime: { $gte: new Date() }
+    });
+    const submissions = await Submission.countDocuments({ submitted: true });
+    
+    // Thống kê blockchain
+    const blockchainStats = getBlockchainStats();
+    
+    return res.json({
+      stats: {
+        totalExams,
+        totalStudents,
+        activeExams,
+        submissions
+      },
+      blockchain: blockchainStats
+    });
+  } catch (error) {
+    console.error('Lỗi lấy thống kê:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ' });
+  }
+});
+
+// API so sánh dữ liệu submission với blockchain
+router.get('/submissions/:submissionId/verify', async (req, res) => {
+  try {
+    const submissionId = req.params.submissionId;
+    
+    if (!submissionId || !submissionId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ message: 'ID bài nộp không hợp lệ' });
+    }
+    
+    const submission = await Submission.findById(submissionId)
+      .populate('student', 'name studentId')
+      .populate('exam', 'title');
+    
+    if (!submission) {
+      return res.status(404).json({ message: 'Không tìm thấy bài nộp' });
+    }
+    
+    // So sánh với blockchain
+    const comparison = await compareSubmissionWithBlockchain(submission);
+    
+    return res.json({
+      submission: {
+        id: submission._id,
+        student: submission.student,
+        exam: submission.exam.title,
+        score: submission.score,
+        correctAnswers: submission.correctAnswers,
+        totalQuestions: submission.totalQuestions,
+        blockchainTxId: submission.blockchainTxId
+      },
+      verification: comparison
+    });
+  } catch (error) {
+    console.error('Lỗi xác minh bài nộp:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// API lấy tất cả bài nộp của học sinh từ blockchain
+router.get('/students/:studentId/blockchain-submissions', async (req, res) => {
+  try {
+    const studentId = req.params.studentId;
+    
+    // Kiểm tra học sinh tồn tại
+    const student = await User.findOne({ studentId, role: 'student' });
+    if (!student) {
+      return res.status(404).json({ message: 'Không tìm thấy học sinh' });
+    }
+    
+    // Lấy dữ liệu từ blockchain
+    const blockchainSubmissions = await getSubmissionsByStudent(studentId);
+    
+    // Lấy dữ liệu từ database để so sánh
+    const dbSubmissions = await Submission.find({ student: student._id })
+      .populate('exam', 'title')
+      .sort({ createdAt: -1 });
+    
+    return res.json({
+      student: {
+        studentId: student.studentId,
+        name: student.name
+      },
+      blockchain: blockchainSubmissions,
+      database: dbSubmissions.map(sub => ({
+        _id: sub._id,
+        examTitle: sub.exam.title,
+        score: sub.score,
+        correctAnswers: sub.correctAnswers,
+        totalQuestions: sub.totalQuestions,
+        blockchainTxId: sub.blockchainTxId,
+        createdAt: sub.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Lỗi lấy dữ liệu blockchain của học sinh:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// API lấy tất cả bài nộp của kỳ thi từ blockchain
+router.get('/exams/:examId/blockchain-submissions', async (req, res) => {
+  try {
+    const examId = req.params.examId;
+    
+    if (!examId || !examId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ message: 'ID kỳ thi không hợp lệ' });
+    }
+    
+    // Kiểm tra kỳ thi tồn tại
+    const exam = await Exam.findById(examId);
+    if (!exam) {
+      return res.status(404).json({ message: 'Không tìm thấy kỳ thi' });
+    }
+    
+    // Lấy dữ liệu từ blockchain
+    const blockchainSubmissions = await getSubmissionsByExam(examId);
+    
+    // Lấy dữ liệu từ database để so sánh
+    const dbSubmissions = await Submission.find({ exam: examId })
+      .populate('student', 'studentId name')
+      .sort({ createdAt: -1 });
+    
+    return res.json({
+      exam: {
+        _id: exam._id,
+        title: exam.title
+      },
+      blockchain: blockchainSubmissions,
+      database: dbSubmissions.map(sub => ({
+        _id: sub._id,
+        student: sub.student,
+        score: sub.score,
+        correctAnswers: sub.correctAnswers,
+        totalQuestions: sub.totalQuestions,
+        blockchainTxId: sub.blockchainTxId,
+        createdAt: sub.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Lỗi lấy dữ liệu blockchain của kỳ thi:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// API xác minh tính toàn vẹn blockchain
+router.get('/blockchain/verify', async (req, res) => {
+  try {
+    const verification = verifyBlockchain();
+    
+    // Lấy thêm thống kê chi tiết
+    const stats = getBlockchainStats();
+    
+    return res.json({
+      verification,
+      stats,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Lỗi kiểm tra blockchain:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// API so sánh toàn bộ dữ liệu database với blockchain
+router.get('/blockchain/compare-all', async (req, res) => {
+  try {
+    const submissions = await Submission.find({ submitted: true })
+      .populate('student', 'studentId name')
+      .populate('exam', 'title')
+      .sort({ createdAt: -1 });
+    
+    const comparisons = [];
+    
+    for (const submission of submissions) {
+      const comparison = await compareSubmissionWithBlockchain(submission);
+      comparisons.push({
+        submissionId: submission._id,
+        student: submission.student,
+        exam: submission.exam.title,
+        score: submission.score,
+        blockchainTxId: submission.blockchainTxId,
+        verification: comparison
+      });
+    }
+    
+    // Thống kê tổng quan
+    const consistent = comparisons.filter(c => c.verification.status === 'consistent').length;
+    const inconsistent = comparisons.filter(c => c.verification.status === 'inconsistent').length;
+    const errors = comparisons.filter(c => c.verification.status === 'error').length;
+    const noBlockchain = comparisons.filter(c => c.verification.status === 'no_blockchain_data').length;
+    
+    return res.json({
+      summary: {
+        total: comparisons.length,
+        consistent,
+        inconsistent,
+        errors,
+        noBlockchain,
+        consistencyRate: comparisons.length > 0 ? (consistent / comparisons.length * 100).toFixed(2) : 0
+      },
+      comparisons
+    });
+  } catch (error) {
+    console.error('Lỗi so sánh toàn bộ dữ liệu:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// API lấy chi tiết block từ blockchain
+router.get('/blockchain/blocks/:txId', async (req, res) => {
+  try {
+    const txId = req.params.txId;
+    
+    if (!txId) {
+      return res.status(400).json({ message: 'Thiếu transaction ID' });
+    }
+    
+    const blockData = await getSubmissionFromBlockchain(txId);
+    
+    if (!blockData) {
+      return res.status(404).json({ message: 'Không tìm thấy block với transaction ID này' });
+    }
+    
+    return res.json({
+      block: blockData,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Lỗi lấy chi tiết block:', error);
+    return res.status(500).json({ message: 'Lỗi máy chủ', error: error.message });
+  }
+});
+
+// Thêm vào cuối file admin.js hiện tại
 module.exports = router;
